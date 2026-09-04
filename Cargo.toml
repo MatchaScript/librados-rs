@@ -1,0 +1,20 @@
+[package]
+name = "librados"
+version = "0.1.0"
+edition = "2024"
+authors = ["matcha"]
+description = "Safe synchronous Rust bindings to the Ceph librados C API."
+license = "Apache-2.0"
+
+[dependencies]
+libc = "0.2"
+thiserror = "1.0"
+
+[dev-dependencies]
+uuid = { version = "1.6", features = ["v4"] }
+
+[build-dependencies]
+
+[lib]
+name = "librados"
+path = "src/lib.rs"
