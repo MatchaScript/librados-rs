@@ -1,12 +1,12 @@
 use crate::conn::RadosHandle;
-use crate::error::{check_err, Result};
+use crate::error::{RadosError, Result, check_err};
 use crate::ffi;
 use crate::omap::{OmapKeys, OmapPage};
 use crate::read_op::ReadOp;
 use crate::write_op::WriteOp;
 use libc::{c_char, c_int, c_void, size_t};
 use std::ffi::CString;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -196,8 +196,8 @@ impl IoCtx {
     pub fn omap_get_vals(
         &self,
         oid: &str,
-        start_after: Option<&str>,
-        filter_prefix: Option<&str>,
+        start_after: Option<&[u8]>,
+        filter_prefix: Option<&[u8]>,
         max_return: u64,
     ) -> Result<OmapPage> {
         let mut op = ReadOp::new();
@@ -208,7 +208,7 @@ impl IoCtx {
     pub fn omap_get_keys(
         &self,
         oid: &str,
-        start_after: Option<&str>,
+        start_after: Option<&[u8]>,
         max_return: u64,
     ) -> Result<OmapKeys> {
         let mut op = ReadOp::new();
@@ -271,10 +271,17 @@ impl IoCtx {
         let c_name = CString::new(name)?;
         let c_cookie = CString::new(cookie)?;
         let c_desc = CString::new(desc)?;
-        let mut tv = duration.map(|d| ffi::timeval {
-            tv_sec: d.as_secs() as ffi::__time_t,
-            tv_usec: d.subsec_micros() as ffi::__suseconds_t,
-        });
+        let mut tv = duration
+            .map(|d| {
+                Ok::<_, RadosError>(ffi::timeval {
+                    tv_sec: d
+                        .as_secs()
+                        .try_into()
+                        .map_err(|_| RadosError::Rados(libc::EOVERFLOW))?,
+                    tv_usec: d.subsec_micros().into(),
+                })
+            })
+            .transpose()?;
         // SAFETY: the four strings are NUL-terminated and alive for this call, and duration is
         // null or points at the local timeval, which librados only reads.
         let ret = unsafe {
@@ -402,7 +409,8 @@ impl IoCtx {
     ///
     /// Both callbacks run on a librados thread. `on_notify` returns the bytes to reply with:
     /// the wrapper acks every notification, because a watcher that never acks keeps the
-    /// notifier waiting for its whole timeout.
+    /// notifier waiting for its whole timeout. Do not drop the returned [`Watch`] from either
+    /// callback: its destructor waits for this callback strand to flush and would deadlock.
     pub fn watch(
         &self,
         oid: &str,
@@ -457,7 +465,11 @@ impl IoCtx {
     /// `timeouts` populated, not raised as an error.
     pub fn notify(&self, oid: &str, payload: &[u8], timeout: Duration) -> Result<NotifyResponse> {
         let c_oid = CString::new(oid)?;
-        let timeout_ms = timeout.as_millis().div_ceil(1000) as u64 * 1000;
+        let timeout_seconds = u32::try_from(timeout.as_millis().div_ceil(1000))
+            .map_err(|_| RadosError::Rados(libc::EOVERFLOW))?;
+        let timeout_ms = u64::from(timeout_seconds) * 1000;
+        let payload_len =
+            c_int::try_from(payload.len()).map_err(|_| RadosError::Rados(libc::EOVERFLOW))?;
         let mut reply: *mut c_char = ptr::null_mut();
         let mut reply_len: size_t = 0;
         // SAFETY: c_oid is NUL-terminated, payload is readable for payload.len() bytes and
@@ -467,14 +479,18 @@ impl IoCtx {
                 self.raw(),
                 c_oid.as_ptr(),
                 payload.as_ptr().cast::<c_char>(),
-                payload.len() as c_int,
+                payload_len,
                 timeout_ms,
                 &mut reply,
                 &mut reply_len,
             )
         };
-        if -ret != libc::ETIMEDOUT {
-            check_err(ret)?;
+        if -ret != libc::ETIMEDOUT
+            && let Err(err) = check_err(ret)
+        {
+            // librados fills this buffer even when it reports an error.
+            unsafe { ffi::rados_buffer_free(reply) };
+            return Err(err);
         }
         let response = decode_notify_response(reply, reply_len);
         // SAFETY: reply is null or the buffer rados_notify2 allocated for this call.
@@ -546,7 +562,8 @@ struct WatchState {
 ///
 /// The `IoCtx` is held here rather than read back out of the `WatchState`, so that `drop` can
 /// name the handles `rados_unwatch2` and `rados_watch_flush` need without touching the
-/// allocation a running callback still borrows.
+/// allocation a running callback still borrows. It must not be dropped from one of its own
+/// callbacks because `drop` waits for the callback strand to flush.
 pub struct Watch {
     handle: u64,
     io: IoCtx,
@@ -602,6 +619,12 @@ unsafe extern "C" fn watch_notify_trampoline(
     };
     let reply =
         catch_unwind(AssertUnwindSafe(|| (state.on_notify)(notification))).unwrap_or_default();
+    let reply_len = c_int::try_from(reply.len()).unwrap_or(0);
+    let reply_ptr = if reply_len == 0 {
+        ptr::null()
+    } else {
+        reply.as_ptr().cast::<c_char>()
+    };
     // SAFETY: the ioctx and oid live in the WatchState, and reply is readable for its length.
     unsafe {
         ffi::rados_notify_ack(
@@ -609,8 +632,8 @@ unsafe extern "C" fn watch_notify_trampoline(
             state.oid.as_ptr(),
             notify_id,
             handle,
-            reply.as_ptr().cast::<c_char>(),
-            reply.len() as c_int,
+            reply_ptr,
+            reply_len,
         );
     }
 }

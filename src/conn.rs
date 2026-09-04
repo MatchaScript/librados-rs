@@ -1,4 +1,4 @@
-use crate::error::{check_err, Result};
+use crate::error::{RadosError, Result, check_err};
 use crate::ffi;
 use crate::ioctx::IoCtx;
 use libc::c_char;
@@ -105,13 +105,15 @@ impl Rados {
     /// (`RadosClient.cc:781-794`).
     pub fn blocklist_add(&self, addr: &str, expire: Duration) -> Result<()> {
         let mut c_addr = CString::new(addr)?.into_bytes_with_nul();
+        let expire_seconds =
+            u32::try_from(expire.as_secs()).map_err(|_| RadosError::Rados(libc::EOVERFLOW))?;
         // SAFETY: c_addr is NUL-terminated and alive for this call; rados_blocklist_add takes
         // a mutable pointer but only reads the string (RadosClient.cc:781-794).
         let ret = unsafe {
             ffi::rados_blocklist_add(
                 self.handle.0,
                 c_addr.as_mut_ptr().cast::<c_char>(),
-                expire.as_secs() as u32,
+                expire_seconds,
             )
         };
         check_err(ret)

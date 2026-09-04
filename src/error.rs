@@ -14,6 +14,9 @@ pub enum RadosError {
 
     #[error("Nul byte in C string: {0}")]
     Nul(#[from] NulError),
+
+    #[error("read result handle belongs to another operation")]
+    InvalidHandle,
 }
 
 pub type Result<T> = std::result::Result<T, RadosError>;

@@ -1,4 +1,4 @@
-use crate::error::{check_err, Result};
+use crate::error::{Result, check_err};
 use crate::ffi;
 use crate::ioctx::IoCtx;
 use crate::omap::{OmapIter, OmapKeys, OmapPage};
@@ -8,6 +8,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
+use std::sync::Arc;
 
 /// A step's output slots. librados receives their addresses when the step is added and writes
 /// through them during `operate`, so every step is boxed and stays put until then.
@@ -18,17 +19,10 @@ trait ReadStep {
 
 /// Where a step's result lands in `ReadResults`.
 pub struct Handle<T> {
+    operation: Arc<()>,
     index: usize,
     _marker: PhantomData<T>,
 }
-
-impl<T> Clone for Handle<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for Handle<T> {}
 
 struct ReadStepData {
     buf: Vec<u8>,
@@ -89,6 +83,7 @@ impl ReadStep for OmapKeysStep {
 /// under; `operate` runs the whole op and moves the results out.
 pub struct ReadOp {
     op: ffi::rados_read_op_t,
+    operation: Arc<()>,
     steps: Vec<Box<dyn ReadStep>>,
 }
 
@@ -111,6 +106,7 @@ impl ReadOp {
         // SAFETY: rados_create_read_op takes no arguments and always returns an owned op.
         Self {
             op: unsafe { ffi::rados_create_read_op() },
+            operation: Arc::new(()),
             steps: Vec::new(),
         }
     }
@@ -123,6 +119,7 @@ impl ReadOp {
     fn push<T>(&mut self, step: Box<dyn ReadStep>) -> Handle<T> {
         self.steps.push(step);
         Handle {
+            operation: self.operation.clone(),
             index: self.steps.len() - 1,
             _marker: PhantomData,
         }
@@ -149,15 +146,14 @@ impl ReadOp {
         self.push(step)
     }
 
-    /// `start_after` and `filter_prefix` reach the OSD as NUL-terminated strings
-    /// (`librados_c.cc:4411-4412`), so a key holding a NUL cannot be named here; such a value
-    /// returns `RadosError::Nul`. The range excludes `start_after`, and `None` is passed as
-    /// `""`, so an entry stored under the empty key is never returned by this call.
-    /// `omap_get_vals_by_keys` reads it.
+    /// `start_after` and `filter_prefix` reach the OSD as NUL-terminated byte strings
+    /// (`librados_c.cc:4411-4412`), so they may be non-UTF-8 but cannot contain NUL. The range
+    /// excludes `start_after`, and `None` is passed as `""`, so an entry stored under the empty
+    /// key is never returned by this call. `omap_get_vals_by_keys` reads it.
     pub fn omap_get_vals(
         &mut self,
-        start_after: Option<&str>,
-        filter_prefix: Option<&str>,
+        start_after: Option<&[u8]>,
+        filter_prefix: Option<&[u8]>,
         max_return: u64,
     ) -> Result<Handle<OmapPage>> {
         let start = start_after.map(CString::new).transpose()?;
@@ -187,7 +183,7 @@ impl ReadOp {
     /// holding a NUL, and the empty key never appears in the result.
     pub fn omap_get_keys(
         &mut self,
-        start_after: Option<&str>,
+        start_after: Option<&[u8]>,
         max_return: u64,
     ) -> Result<Handle<OmapKeys>> {
         let start = start_after.map(CString::new).transpose()?;
@@ -245,6 +241,7 @@ impl ReadOp {
         check_err(ret)?;
         let steps = std::mem::take(&mut self.steps);
         Ok(ReadResults {
+            operation: self.operation.clone(),
             results: steps
                 .into_iter()
                 .map(|step| Some((step.prval(), step.into_result())))
@@ -255,6 +252,7 @@ impl ReadOp {
 
 /// The results of a completed read op, in the order the steps were added.
 pub struct ReadResults {
+    operation: Arc<()>,
     results: Vec<Option<(c_int, Box<dyn Any>)>>,
 }
 
@@ -275,10 +273,36 @@ impl ReadResults {
     /// The OSD stops at the first failing sub-operation, so a step that did not run reports
     /// `prval` 0 and yields its empty result.
     pub fn take<T: 'static>(&mut self, handle: Handle<T>) -> Result<T> {
+        if !Arc::ptr_eq(&self.operation, &handle.operation) {
+            return Err(crate::error::RadosError::InvalidHandle);
+        }
         let (prval, value) = self.results[handle.index]
             .take()
             .expect("result already taken");
         check_err(prval)?;
         Ok(*value.downcast::<T>().expect("handle names its own step"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RadosError;
+
+    #[test]
+    fn rejects_a_handle_from_another_operation() {
+        let handle = Handle::<Vec<u8>> {
+            operation: Arc::new(()),
+            index: 0,
+            _marker: PhantomData,
+        };
+        let mut results = ReadResults {
+            operation: Arc::new(()),
+            results: Vec::new(),
+        };
+        assert!(matches!(
+            results.take(handle),
+            Err(RadosError::InvalidHandle)
+        ));
     }
 }
