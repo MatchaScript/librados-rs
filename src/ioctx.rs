@@ -619,6 +619,12 @@ unsafe extern "C" fn watch_notify_trampoline(
     };
     let reply =
         catch_unwind(AssertUnwindSafe(|| (state.on_notify)(notification))).unwrap_or_default();
+    let reply_len = c_int::try_from(reply.len()).unwrap_or(0);
+    let reply_ptr = if reply_len == 0 {
+        ptr::null()
+    } else {
+        reply.as_ptr().cast::<c_char>()
+    };
     // SAFETY: the ioctx and oid live in the WatchState, and reply is readable for its length.
     unsafe {
         ffi::rados_notify_ack(
@@ -626,8 +632,8 @@ unsafe extern "C" fn watch_notify_trampoline(
             state.oid.as_ptr(),
             notify_id,
             handle,
-            reply.as_ptr().cast::<c_char>(),
-            reply.len() as c_int,
+            reply_ptr,
+            reply_len,
         );
     }
 }
