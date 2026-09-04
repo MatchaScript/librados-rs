@@ -9,12 +9,12 @@ pub mod write_op;
 pub use conn::Rados;
 pub use error::{RadosError, Result};
 pub use ioctx::{
-    IoCtx, Locker, Lockers, Notification, NotifyAck, NotifyResponse, NotifyTimeout, ObjectStat,
-    Watch, LOCK_FLAG_MAY_RENEW, LOCK_FLAG_MUST_RENEW,
+    IoCtx, LOCK_FLAG_MAY_RENEW, LOCK_FLAG_MUST_RENEW, Locker, Lockers, Notification, NotifyAck,
+    NotifyResponse, NotifyTimeout, ObjectStat, Watch,
 };
 pub use omap::{OmapKeys, OmapPage};
 pub use read_op::{Handle, ReadOp, ReadResults};
-pub use write_op::{CmpHandle, WriteError, WriteOp, CMPXATTR_OP_EQ};
+pub use write_op::{CMPXATTR_OP_EQ, CmpHandle, WriteError, WriteOp};
 
 /// Helper to get the librados version as (major, minor, extra)
 pub fn version() -> (i32, i32, i32) {

@@ -1,4 +1,4 @@
-use crate::error::{check_err, RadosError, Result};
+use crate::error::{RadosError, Result, check_err};
 use crate::ffi;
 use crate::ioctx::IoCtx;
 use libc::{c_char, c_int, size_t};

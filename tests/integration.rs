@@ -1,6 +1,6 @@
 //! Run against a cluster started by `hack/run-ceph.sh`: `cargo test -- --include-ignored`.
 
-use librados::{IoCtx, Rados, RadosError, ReadOp, WriteOp, CMPXATTR_OP_EQ, LOCK_FLAG_MUST_RENEW};
+use librados::{CMPXATTR_OP_EQ, IoCtx, LOCK_FLAG_MUST_RENEW, Rados, RadosError, ReadOp, WriteOp};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -99,6 +99,22 @@ fn omap_round_trip() {
             assert!(listed.keys.contains(*key), "{key:?}");
         }
 
+        let binary_oid = "binary_omap_cursor";
+        ioctx
+            .omap_set(binary_oid, &[(b"\x80", b"a"), (b"\x81", b"b")])
+            .expect("set binary keys");
+        let first = ioctx
+            .omap_get_vals(binary_oid, None, None, 1)
+            .expect("first binary page");
+        let cursor = first.entries.last_key_value().expect("binary cursor").0;
+        let second = ioctx
+            .omap_get_vals(binary_oid, Some(cursor), None, 1)
+            .expect("second binary page");
+        assert_eq!(
+            second.entries.keys().next().map(Vec::as_slice),
+            Some(&b"\x81"[..])
+        );
+
         ioctx
             .omap_rm_keys(oid, &[b"with\0nul"])
             .expect("omap_rm_keys");
@@ -109,11 +125,13 @@ fn omap_round_trip() {
         assert!(!after.keys.contains(b"with\0nul".as_slice()));
 
         ioctx.omap_clear(oid).expect("omap_clear");
-        assert!(ioctx
-            .omap_get_keys(oid, None, 100)
-            .expect("get_keys after clear")
-            .keys
-            .is_empty());
+        assert!(
+            ioctx
+                .omap_get_keys(oid, None, 100)
+                .expect("get_keys after clear")
+                .keys
+                .is_empty()
+        );
 
         let err = ioctx
             .omap_get_vals("no_such_object", None, None, 100)
@@ -152,7 +170,7 @@ fn omap_page_is_marked_truncated() {
             String::from_utf8(first.keys.last().expect("non-empty page").clone()).unwrap();
         loop {
             let page = ioctx
-                .omap_get_keys(oid, Some(&last), total as u64)
+                .omap_get_keys(oid, Some(last.as_bytes()), total as u64)
                 .expect("get_keys page");
             seen += page.keys.len();
             if !page.more {
@@ -532,21 +550,25 @@ fn exclusive_locks() {
         other
             .break_lock(oid, lease, &locker.client, "cookie-a")
             .expect("break_lock");
-        assert!(other
-            .list_lockers(oid, lease)
-            .expect("list_lockers after break")
-            .lockers
-            .is_empty());
+        assert!(
+            other
+                .list_lockers(oid, lease)
+                .expect("list_lockers after break")
+                .lockers
+                .is_empty()
+        );
 
         ioctx
             .lock_exclusive(oid, lease, "cookie-a", "", ttl, 0)
             .expect("re-acquire");
         ioctx.unlock(oid, lease, "cookie-a").expect("unlock");
-        assert!(ioctx
-            .list_lockers(oid, lease)
-            .expect("list_lockers after unlock")
-            .lockers
-            .is_empty());
+        assert!(
+            ioctx
+                .list_lockers(oid, lease)
+                .expect("list_lockers after unlock")
+                .lockers
+                .is_empty()
+        );
 
         // cls_lock expires the lock on the OSD's clock.
         ioctx
