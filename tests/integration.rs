@@ -781,3 +781,21 @@ fn blocklist_fences_the_old_writer() {
     drop(fenced);
     keeper.delete_pool(&pool).expect("delete pool");
 }
+
+#[test]
+#[ignore]
+fn list_objects_tracks_writes_and_removes() {
+    with_pool(|ioctx| {
+        for oid in ["list_a", "list_b", "list_c"] {
+            ioctx.write_full(oid, b"x").expect("write_full");
+        }
+        let mut listed = ioctx.list_objects().expect("list_objects");
+        listed.sort();
+        assert_eq!(listed, ["list_a", "list_b", "list_c"]);
+
+        ioctx.remove("list_b").expect("remove");
+        let mut listed = ioctx.list_objects().expect("list_objects");
+        listed.sort();
+        assert_eq!(listed, ["list_a", "list_c"]);
+    });
+}
