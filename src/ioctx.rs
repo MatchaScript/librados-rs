@@ -171,6 +171,45 @@ impl IoCtx {
         check_err(ret)
     }
 
+    /// Every object name in the ioctx's namespace. `rados_nobjects_list_next2` hands back a
+    /// pointer into the entry it drops on the following call (`librados_c.cc:2460-2476`), so
+    /// each name is copied out before the loop advances.
+    pub fn list_objects(&self) -> Result<Vec<String>> {
+        let mut ctx: ffi::rados_list_ctx_t = ptr::null_mut();
+        // SAFETY: the ioctx is live for the lifetime of self and the out slot is valid for
+        // the call.
+        check_err(unsafe { ffi::rados_nobjects_list_open(self.raw(), &mut ctx) })?;
+        let list = ObjectList(ctx);
+        let mut names = Vec::new();
+        loop {
+            let mut entry: *const c_char = ptr::null();
+            let mut entry_size: size_t = 0;
+            // SAFETY: list.0 is a live listing context and the two out slots are valid for
+            // the call. Only `entry` is dereferenced unconditionally; librados skips every
+            // other slot passed as null (`librados_c.cc:2477-2491`).
+            let ret = unsafe {
+                ffi::rados_nobjects_list_next2(
+                    list.0,
+                    &mut entry,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut entry_size,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            // The listing is drained, not an object that went missing.
+            if -ret == libc::ENOENT {
+                return Ok(names);
+            }
+            check_err(ret)?;
+            // SAFETY: on success entry is readable for entry_size bytes, until the next call
+            // on this context.
+            let name = unsafe { std::slice::from_raw_parts(entry.cast::<u8>(), entry_size) };
+            names.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+
     pub fn omap_set<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         oid: &str,
@@ -496,6 +535,18 @@ impl IoCtx {
         // SAFETY: reply is null or the buffer rados_notify2 allocated for this call.
         unsafe { ffi::rados_buffer_free(reply) };
         response
+    }
+}
+
+/// The listing context `rados_nobjects_list_open` allocates. `rados_nobjects_list_close` is
+/// its only deallocator, and it runs here so that an error mid-listing still releases it.
+struct ObjectList(ffi::rados_list_ctx_t);
+
+impl Drop for ObjectList {
+    fn drop(&mut self) {
+        // SAFETY: the context came from a successful rados_nobjects_list_open and this
+        // uniquely-dropped value closes it exactly once.
+        unsafe { ffi::rados_nobjects_list_close(self.0) };
     }
 }
 
